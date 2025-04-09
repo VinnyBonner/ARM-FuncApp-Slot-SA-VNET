@@ -116,7 +116,7 @@
   },
   "variables": {
     "applicationInsightsName": "[format('appi-{0}', uniqueString(resourceGroup().id))]",
-    "privateFunctionAppDnsZoneName": "privatelink.azurewebsites.net",
+    "privateFunctionAppDnsZoneName": "privatelink.azurewebsites.us",
     "privateEndpointFunctionAppName": "[format('{0}-private-endpoint', parameters('functionAppName'))]",
     "privateEndpointFunctionAppSlotName": "[format('{0}-{1}-private-endpoint', parameters('functionAppName'), parameters('SlotName'))]",
     "privateStorageFileDnsZoneName": "[format('privatelink.file.{0}', environment().suffixes.storage)]",
