@@ -35,17 +35,33 @@
       "type": "string",
       "defaultValue": "dotnet-isolated",
       "allowedValues": [
-        "dotnet-isolated"
+        "dotnet-isolated",
+        "node",
+        "python",
+        "java"
       ],
       "metadata": {
         "description": "The language worker runtime to load in the function app."
       }
     },
+    "functionPlanOS": {
+      "type": "string",
+      "defaultValue": "Windows",
+      "allowedValues": [
+        "Windows",
+        "Linux"
+      ],
+      "metadata": {
+        "description": "Specifies the OS used for the Azure Function hosting plan."
+      }
+    },
     "functionAppPlanSku": {
       "type": "string",
-      "defaultValue": "P1v3",
+      "defaultValue": "EP1",
       "allowedValues": [
-        "P1v3"
+        "EP1",
+        "EP2",
+        "EP3"
       ],
       "metadata": {
         "description": "Specifies the Azure Function hosting plan SKU."
@@ -107,10 +123,11 @@
         "description": "The IP address space used for the private endpoints."
       }
     },
-    "packageUri": {
-      "type": "String",      
+    "linuxFxVersion": {
+      "type": "string",
+      "defaultValue": "",
       "metadata": {
-          "description": "The zip content url."
+        "description": "Only required for Linux app to represent runtime stack in the format of 'runtime|runtimeVersion'. For example: 'python|3.9'"
       }
     }
   },
@@ -126,7 +143,10 @@
     "privateStorageBlobDnsZoneName": "[format('privatelink.blob.{0}', environment().suffixes.storage)]",
     "privateEndpointStorageBlobName": "[format('{0}-blob-private-endpoint', parameters('functionStorageAccountName'))]",
     "privateStorageQueueDnsZoneName": "[format('privatelink.queue.{0}', environment().suffixes.storage)]",
-    "privateEndpointStorageQueueName": "[format('{0}-queue-private-endpoint', parameters('functionStorageAccountName'))]"
+    "privateEndpointStorageQueueName": "[format('{0}-queue-private-endpoint', parameters('functionStorageAccountName'))]",
+    "functionContentShareName": "function-content-share",
+    "functionSlotContentShareName": "function-slot-content-share",
+    "isReserved": "[if(equals(parameters('functionPlanOS'), 'Linux'), true(), false())]"
   },
   "resources": [
     {
@@ -442,7 +462,7 @@
     },
 
     {
-      "comments": "~~~ FUNCTION APP AND SLOT STORAGE ACCOUNT TO USE ~~~",
+      "comments": "~~~ START FUNCTION APP AND SLOT STORAGE ACCOUNT TO USE ~~~",
       "type": "Microsoft.Storage/storageAccounts",
       "apiVersion": "2022-05-01",
       "name": "[parameters('functionStorageAccountName')]",
@@ -459,6 +479,23 @@
           "defaultAction": "Deny"
         }
       }
+    },
+    {
+      "type": "Microsoft.Storage/storageAccounts/fileServices/shares",
+      "apiVersion": "2022-05-01",
+      "name": "[format('{0}/default/{1}', parameters('functionStorageAccountName'), variables('functionContentShareName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Storage/storageAccounts', parameters('functionStorageAccountName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Storage/storageAccounts/fileServices/shares",
+      "apiVersion": "2022-05-01",
+      "name": "[format('{0}/default/{1}', parameters('functionStorageAccountName'), variables('functionslotContentShareName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Storage/storageAccounts', parameters('functionStorageAccountName'))]"
+      ],
+      "comments": "~~~ END FUNCTION APP AND SLOT STORAGE ACCOUNT TO USE ~~~"
     },
 
     {
@@ -480,12 +517,16 @@
       "name": "[parameters('functionAppPlanName')]",
       "location": "[parameters('location')]",
       "sku": {
-        "tier": "PremiumV3",
+        "tier": "ElasticPremium",
         "name": "[parameters('functionAppPlanSku')]",
         "size": "[parameters('functionAppPlanSku')]",
-        "family": "Pv3"
+        "family": "EP"
       },
-      "kind": "app"
+      "kind": "elastic",
+      "properties": {
+        "maximumElasticWorkerCount": 20,
+        "reserved": "[variables('isReserved')]"
+      }
     },
 
     {
@@ -519,10 +560,13 @@
       "apiVersion": "2022-03-01",
       "name": "[parameters('functionAppName')]",
       "location": "[parameters('location')]",
-      "kind": "functionapp",
+      "kind": "[if(variables('isReserved'), 'functionapp,linux', 'functionapp')]",
       "properties": {
+        "reserved": "[variables('isReserved')]",
         "serverFarmId": "[resourceId('Microsoft.Web/serverfarms', parameters('functionAppPlanName'))]",
         "siteConfig": {
+          "functionsRuntimeScaleMonitoringEnabled": true,
+          "linuxFxVersion": "[if(variables('isReserved'), parameters('linuxFxVersion'), json('null'))]",
           "appSettings": [
             {
               "name": "APPINSIGHTS_INSTRUMENTATIONKEY",
@@ -531,6 +575,14 @@
             {
               "name": "AzureWebJobsStorage",
               "value": "[format('DefaultEndpointsProtocol=https;AccountName={0};AccountKey={1};EndpointSuffix=core.usgovcloudapi.net;', parameters('functionStorageAccountName'), listkeys(resourceId('Microsoft.Storage/storageAccounts', parameters('functionStorageAccountName')), '2022-05-01').keys[0].value)]"
+            },
+            {
+              "name": "WEBSITE_CONTENTAZUREFILECONNECTIONSTRING",
+              "value": "[format('DefaultEndpointsProtocol=https;AccountName={0};AccountKey={1};EndpointSuffix=core.usgovcloudapi.net;', parameters('functionStorageAccountName'), listkeys(resourceId('Microsoft.Storage/storageAccounts', parameters('functionStorageAccountName')), '2022-05-01').keys[0].value)]"
+            },
+            {
+              "name": "WEBSITE_CONTENTSHARE",
+              "value": "[variables('functionContentShareName')]"
             },
             {
               "name": "WEBSITE_RUN_FROM_PACKAGE",
@@ -566,7 +618,8 @@
         "[resourceId('Microsoft.Network/privateDnsZones/virtualNetworkLinks', variables('privateStorageFileDnsZoneName'), format('{0}-link', variables('privateStorageFileDnsZoneName')))]",
         "[resourceId('Microsoft.Network/privateDnsZones/virtualNetworkLinks', variables('privateStorageQueueDnsZoneName'), format('{0}-link', variables('privateStorageQueueDnsZoneName')))]",
         "[resourceId('Microsoft.Network/privateDnsZones/virtualNetworkLinks', variables('privateStorageTableDnsZoneName'), format('{0}-link', variables('privateStorageTableDnsZoneName')))]",
-        "[resourceId('Microsoft.Storage/storageAccounts', parameters('functionStorageAccountName'))]"
+        "[resourceId('Microsoft.Storage/storageAccounts', parameters('functionStorageAccountName'))]",
+        "[resourceId('Microsoft.Storage/storageAccounts/fileServices/shares', split(format('{0}/default/{1}', parameters('functionStorageAccountName'), variables('functionContentShareName')), '/')[0], split(format('{0}/default/{1}', parameters('functionStorageAccountName'), variables('functionContentShareName')), '/')[1], split(format('{0}/default/{1}', parameters('functionStorageAccountName'), variables('functionContentShareName')), '/')[2])]"
       ]
     },
     {
@@ -625,21 +678,7 @@
       "dependsOn": [
         "[resourceId('Microsoft.Network/privateEndpoints', variables('privateEndpointFunctionAppName'))]",
         "[resourceId('Microsoft.Network/privateDnsZones', variables('privateFunctionAppDnsZoneName'))]"
-      ]
-      
-    },    
-    {
-      "type": "Microsoft.Web/sites/extensions",
-      "apiVersion": "2021-03-01",
-      "name": "[format('{0}/ZipDeploy', parameters('functionAppName'))]",
-      "dependsOn": [
-          "[resourceId('Microsoft.Web/sites', parameters('functionAppName'))]",
-          "[resourceId('Microsoft.Network/privateEndpoints', variables('privateEndpointFunctionAppName'))]",
-          "[resourceId('Microsoft.Network/privateDnsZones', variables('privateFunctionAppDnsZoneName'))]"
-        ],
-      "properties": {
-          "packageUri": "[parameters('packageUri')]"
-      },
+      ],
       "comments": "~~~ END FUNCTION APP RESOURCES ~~~"
     },
 
@@ -649,10 +688,13 @@
       "apiVersion": "2022-03-01",
       "name": "[format('{0}/{1}', parameters('functionAppName'), parameters('SlotName'))]",
       "location": "[parameters('location')]",
-      "kind": "functionapp",
+      "kind": "[if(variables('isReserved'), 'functionapp,linux', 'functionapp')]",
       "properties": {
+        "reserved": "[variables('isReserved')]",
         "serverFarmId": "[resourceId('Microsoft.Web/serverfarms', parameters('functionAppPlanName'))]",
         "siteConfig": {
+          "functionsRuntimeScaleMonitoringEnabled": true,
+          "linuxFxVersion": "[if(variables('isReserved'), parameters('linuxFxVersion'), json('null'))]",
           "appSettings": [
             {
               "name": "APPINSIGHTS_INSTRUMENTATIONKEY",
@@ -661,6 +703,14 @@
             {
               "name": "AzureWebJobsStorage",
               "value": "[format('DefaultEndpointsProtocol=https;AccountName={0};AccountKey={1};EndpointSuffix=core.usgovcloudapi.net;', parameters('functionStorageAccountName'), listkeys(resourceId('Microsoft.Storage/storageAccounts', parameters('functionStorageAccountName')), '2022-05-01').keys[0].value)]"
+            },
+            {
+              "name": "WEBSITE_CONTENTAZUREFILECONNECTIONSTRING",
+              "value": "[format('DefaultEndpointsProtocol=https;AccountName={0};AccountKey={1};EndpointSuffix=core.usgovcloudapi.net;', parameters('functionStorageAccountName'), listkeys(resourceId('Microsoft.Storage/storageAccounts', parameters('functionStorageAccountName')), '2022-05-01').keys[0].value)]"
+            },
+            {
+              "name": "WEBSITE_CONTENTSHARE",
+              "value": "[variables('functionSlotContentShareName')]"
             },
             {
               "name": "WEBSITE_RUN_FROM_PACKAGE",
@@ -697,7 +747,8 @@
         "[resourceId('Microsoft.Network/privateDnsZones/virtualNetworkLinks', variables('privateStorageFileDnsZoneName'), format('{0}-link', variables('privateStorageFileDnsZoneName')))]",
         "[resourceId('Microsoft.Network/privateDnsZones/virtualNetworkLinks', variables('privateStorageQueueDnsZoneName'), format('{0}-link', variables('privateStorageQueueDnsZoneName')))]",
         "[resourceId('Microsoft.Network/privateDnsZones/virtualNetworkLinks', variables('privateStorageTableDnsZoneName'), format('{0}-link', variables('privateStorageTableDnsZoneName')))]",
-        "[resourceId('Microsoft.Storage/storageAccounts', parameters('functionStorageAccountName'))]"
+        "[resourceId('Microsoft.Storage/storageAccounts', parameters('functionStorageAccountName'))]",
+        "[resourceId('Microsoft.Storage/storageAccounts/fileServices/shares', split(format('{0}/default/{1}', parameters('functionStorageAccountName'), variables('functionSlotContentShareName')), '/')[0], split(format('{0}/default/{1}', parameters('functionStorageAccountName'), variables('functionSlotContentShareName')), '/')[1], split(format('{0}/default/{1}', parameters('functionStorageAccountName'), variables('functionSlotContentShareName')), '/')[2])]"
       ]
     },
     {
@@ -756,21 +807,8 @@
       "dependsOn": [
         "[resourceId('Microsoft.Network/privateEndpoints', variables('privateEndpointFunctionAppSlotName'))]",
         "[resourceId('Microsoft.Network/privateDnsZones', variables('privateFunctionAppDnsZoneName'))]"
-      ]      
-    },
-    {
-      "type": "Microsoft.Web/sites/slots/extensions",
-      "apiVersion": "2021-03-01",
-      "name": "[format('{0}/{1}/ZipDeploy', parameters('functionAppName'), parameters('SlotName'))]",
-      "dependsOn": [
-          "[resourceId('Microsoft.Web/sites/slots', parameters('functionAppName'), parameters('SlotName'))]",
-          "[resourceId('Microsoft.Network/privateEndpoints', variables('privateEndpointFunctionAppSlotName'))]",
-          "[resourceId('Microsoft.Network/privateDnsZones', variables('privateFunctionAppDnsZoneName'))]"
-        ],
-      "properties": {
-          "packageUri": "[parameters('packageUri')]"
-      },
-      "comments": "~~~ END FUNCTION SLOT RESOURCES ~~~"
+      ],
+      "comments": "~~~ END FUNCTION SLOT RESOURCES ~~~"      
     }
   ]
 }
